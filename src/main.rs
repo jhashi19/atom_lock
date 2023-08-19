@@ -2,7 +2,9 @@ use std::thread;
 
 use spin_lock::SpinLock;
 
+mod channel;
 mod spin_lock;
+
 fn main() {
     //SpinLockの動作確認
     //------------------------------------------------------------------------------ /
