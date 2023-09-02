@@ -1,5 +1,6 @@
 use std::thread;
 
+use channel::Channel;
 use spin_lock::SpinLock;
 
 mod channel;
@@ -19,6 +20,23 @@ fn main() {
     });
     let g = x.lock();
     assert!(g.as_slice() == [1, 2, 2] || g.as_slice() == [2, 2, 1]);
-    println!("{:?}", g.as_slice());
+    // println!("{:?}", g.as_slice());
+    //------------------------------------------------------------------------------ /
+
+    //Channelの動作確認
+    //------------------------------------------------------------------------------ /
+    let channel = Channel::new();
+    let t = thread::current();
+    thread::scope(|s| {
+        s.spawn(|| {
+            channel.send("hello world!");
+            t.unpark();
+        });
+        while !channel.is_ready() {
+            thread::park();
+        }
+        assert_eq!(channel.receive(), "hello world!")
+    })
+
     //------------------------------------------------------------------------------ /
 }
