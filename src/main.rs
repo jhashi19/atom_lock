@@ -1,7 +1,8 @@
 use std::thread;
 
-use channel::Channel;
 use spin_lock::SpinLock;
+
+use crate::channel::channel;
 
 mod channel;
 mod spin_lock;
@@ -25,17 +26,17 @@ fn main() {
 
     //Channelの動作確認
     //------------------------------------------------------------------------------ /
-    let channel = Channel::new();
-    let t = thread::current();
     thread::scope(|s| {
-        s.spawn(|| {
-            channel.send("hello world!");
+        let (sender, receiver) = channel();
+        let t = thread::current();
+        s.spawn(move || {
+            sender.send("hello world!");
             t.unpark();
         });
-        while !channel.is_ready() {
+        while !receiver.is_ready() {
             thread::park();
         }
-        assert_eq!(channel.receive(), "hello world!")
+        assert_eq!(receiver.receive(), "hello world!");
     })
 
     //------------------------------------------------------------------------------ /
