@@ -2,7 +2,7 @@ use std::thread;
 
 use spin_lock::SpinLock;
 
-use crate::channel::channel;
+use crate::channel::Channel;
 
 mod channel;
 mod spin_lock;
@@ -26,8 +26,9 @@ fn main() {
 
     //Channelの動作確認
     //------------------------------------------------------------------------------ /
+    let mut channel = Channel::new();
     thread::scope(|s| {
-        let (sender, receiver) = channel();
+        let (sender, receiver) = channel.split();
         let t = thread::current();
         s.spawn(move || {
             sender.send("hello world!");
