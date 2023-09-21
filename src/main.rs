@@ -4,6 +4,7 @@ use spin_lock::SpinLock;
 
 use crate::channel::Channel;
 
+mod arc;
 mod channel;
 mod spin_lock;
 
@@ -34,6 +35,5 @@ fn main() {
         });
         assert_eq!(receiver.receive(), "hello world!");
     })
-
     //------------------------------------------------------------------------------ /
 }
