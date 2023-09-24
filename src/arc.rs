@@ -1,5 +1,6 @@
 use std::{
     cell::UnsafeCell,
+    mem::ManuallyDrop,
     ops::Deref,
     ptr::NonNull,
     sync::atomic::{
@@ -11,12 +12,15 @@ use std::{
 struct ArcData<T> {
     data_ref_count: AtomicUsize,
     alloc_ref_count: AtomicUsize,
-    data: UnsafeCell<Option<T>>,
+    data: UnsafeCell<ManuallyDrop<T>>,
 }
 
 pub struct Arc<T> {
-    weak: Weak<T>,
+    ptr: NonNull<ArcData<T>>,
 }
+unsafe impl<T: Send + Sync> Send for Arc<T> {}
+unsafe impl<T: Send + Sync> Sync for Arc<T> {}
+
 pub struct Weak<T> {
     ptr: NonNull<ArcData<T>>,
 }
@@ -27,35 +31,55 @@ unsafe impl<T: Send + Sync> Sync for Weak<T> {}
 impl<T> Arc<T> {
     pub fn new(data: T) -> Arc<T> {
         Arc {
-            weak: Weak {
-                ptr: NonNull::from(Box::leak(Box::new(ArcData {
-                    alloc_ref_count: AtomicUsize::new(1),
-                    data_ref_count: AtomicUsize::new(1),
-                    data: UnsafeCell::new(Some(data)),
-                }))),
-            },
+            ptr: NonNull::from(Box::leak(Box::new(ArcData {
+                alloc_ref_count: AtomicUsize::new(1),
+                data_ref_count: AtomicUsize::new(1),
+                data: UnsafeCell::new(ManuallyDrop::new(data)),
+            }))),
         }
+    }
+
+    fn data(&self) -> &ArcData<T> {
+        unsafe { self.ptr.as_ref() }
     }
 
     pub fn get_mut(arc: &mut Self) -> Option<&mut T> {
-        if arc.weak.data().alloc_ref_count.load(Relaxed) == 1 {
-            fence(Acquire);
-            // Safety: Nothing else can access the data, since
-            // there's only one Arc, to which we have exclusive access.,
-            // and no Weak pointers.
-            let arcdata = unsafe { arc.weak.ptr.as_mut() };
-            let option = arcdata.data.get_mut();
-            // We know the data is still available since we
-            // have an Arc to it, so this won't panic.
-            let data = option.as_mut().unwrap();
-            Some(data)
-        } else {
-            None
+        if arc
+            .data()
+            .alloc_ref_count
+            .compare_exchange(1, usize::MAX, Acquire, Relaxed)
+            .is_err()
+        {
+            return None;
         }
+        let is_unique = arc.data().data_ref_count.load(Relaxed) == 1;
+        arc.data().alloc_ref_count.store(1, Release);
+        if !is_unique {
+            return None;
+        }
+        fence(Acquire);
+        unsafe { Some(&mut *arc.data().data.get()) }
     }
 
     pub fn downgrade(arc: &Self) -> Weak<T> {
-        arc.weak.clone()
+        let mut n = arc.data().alloc_ref_count.load(Relaxed);
+        loop {
+            if n == usize::MAX {
+                std::hint::spin_loop();
+                n = arc.data().alloc_ref_count.load(Relaxed);
+                continue;
+            }
+            assert!(n <= usize::MAX / 2);
+            if let Err(e) =
+                arc.data()
+                    .alloc_ref_count
+                    .compare_exchange_weak(n, n + 1, Acquire, Relaxed)
+            {
+                n = e;
+                continue;
+            }
+            return Weak { ptr: arc.ptr };
+        }
     }
 }
 
@@ -79,7 +103,7 @@ impl<T> Weak<T> {
                 n = e;
                 continue;
             }
-            return Some(Arc { weak: self.clone() });
+            return Some(Arc { ptr: self.ptr });
         }
     }
 }
@@ -88,10 +112,9 @@ impl<T> Deref for Arc<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        let ptr = self.weak.data().data.get();
         // Safety: Since there's an Arc to the data,
         // the data exsits and may be shared.
-        unsafe { (*ptr).as_ref().unwrap() }
+        unsafe { &*self.data().data.get() }
     }
 }
 
@@ -106,11 +129,10 @@ impl<T> Clone for Weak<T> {
 
 impl<T> Clone for Arc<T> {
     fn clone(&self) -> Self {
-        let weak = self.weak.clone();
-        if weak.data().data_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
+        if self.data().data_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
             std::process::abort();
         }
-        Arc { weak }
+        Arc { ptr: self.ptr }
     }
 }
 
@@ -127,14 +149,15 @@ impl<T> Drop for Weak<T> {
 
 impl<T> Drop for Arc<T> {
     fn drop(&mut self) {
-        if self.weak.data().data_ref_count.fetch_sub(1, Release) == 1 {
+        if self.data().data_ref_count.fetch_sub(1, Release) == 1 {
             fence(Acquire);
-            let ptr = self.weak.data().data.get();
             // Safety: The data reference counter is zero,
-            // so nothing will access it.
+            // so nothing will access the data anymore.
             unsafe {
-                (*ptr) = None;
+                ManuallyDrop::drop(&mut *self.data().data.get());
             }
+
+            drop(Weak { ptr: self.ptr })
         }
     }
 }
